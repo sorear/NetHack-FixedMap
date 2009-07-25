@@ -1,13 +1,10 @@
 package NetHack::FixedMap;
 use Moose;
 
-has rows => (
-    isa => 'ArrayRef[Str]',
-    is  => 'ro',
-);
+use List::Util 'max';
 
-has ['rows_x', 'rows_y'] => (
-    isa => 'Int',
+has rows => (
+    isa => 'ArrayRef[ArrayRef]',
     is  => 'ro',
 );
 
@@ -66,7 +63,6 @@ my %char_to_feat = (
     'W' => 'water',
     '.' => 'floor',
     '#' => 'corridor',
-    '{' => 'fountain',
     '\\'=> 'throne',
     ' ' => 'rock',
     '-' => 'wall',
@@ -77,10 +73,10 @@ sub features {
     my $self = shift;
     my @features;
 
-    my $y = $self->rows_y;
     for my $row (@{ $self->rows }) {
-        my $x = $self->rows_x;
-        for my $char (split //, $row) {
+        my $x = $row->[0];
+        my $y = $row->[1];
+        for my $char (split //, $row->[2]) {
             my $ent = $char_to_feat{$char};
 
             if (ref $ent) {
@@ -109,7 +105,7 @@ sub regions {
 
             for my $x ($val->[0]..$val->[2]) {
                 for my $y ($val->[1]..$val->[3]) {
-                    push @xpand, [$x, $y];
+                    push @expand, [$x, $y];
                 }
             }
 
@@ -129,16 +125,16 @@ sub all { \@all }
 __PACKAGE__->meta->make_immutable;
 no Moose;
 
-sub get_line {
+sub _get_line {
     my $sref = shift;
 
-    1 while $$sref =~ m/\G#.*\n/cg;
+    1 while $$sref =~ m/\G(?:#.*)?\n/cg;
 
-    $$sref =~ m/\G([^:]*:?)(.*)\n/cg or return undef;
+    $$sref =~ m/\G([^:\n]*:?)(.*)\n/cg or return undef;
 
     if ($1 eq 'MAP') {
         my @lines = ('MAP');
-        push @lines, $1 while $$sref =~ m/\G(.*)\n/ && $1 ne 'ENDMAP';
+        push @lines, $1 while $$sref =~ m/\G(.*)\n/cg && $1 ne 'ENDMAP';
 
         return \@lines;
     }
@@ -147,72 +143,281 @@ sub get_line {
     my $tail = "$2,";
 
     my @bits = $head;
-    push @bits, $1 while $tail =~ m/\G\s*["']?((?:[^,]+?|\([^)]*\))*?)['"]?\s*,/;
+    push @bits, $1 || $2 || $3 || $4 while $tail =~
+        m/\G\s*  (?:   " ([^"]*) "
+                   |   ' ([^"]*) '
+                   | (\(  [^)]*  \))
+                   |     ([^,]*)
+                   ) \s* ,/xg;
+    #warn "vvv\n";
+    #warn "$_\n" for @bits;
+    #warn "^^^\n";
 
     return \@bits;
 }
 
-sub parse_dgn {
-    my $sref = shift;
+sub _str2xy {
+    my $text = shift;
+
+    return $text =~ m/\((.*),(.*)\)/;
+}
+
+sub _rect2rgn {
+    my ($ox, $oy, $rect, $irreg, $map) = @_;
+    die "irregular regions unimplemented" if $irreg;
+
+    $rect =~ /\((.*),(.*),(.*),(.*)\)/ || die "ill-formed region";
+    return [ $1 + $ox, $2 + $oy, $3 + $ox, $4 + $oy ];
+}
+
+sub _item2nhi {
+    my ($sym, $extra) = @_;
+
+    return "potion of $extra" if $sym eq '!';
+    return $extra;
+}
+
+my %level_info = (
+    minend => ['mines', 8, 9],
+);
+
+sub _parse_dgn {
+    my $str = shift;
+    my $sref = \$str;
     my $line;
 
-    my (@allrows, $name);
+    my (@allrows, @currows, $name, $halign, $valign, $offs_x, $offs_y, %rgn,
+        @extrafeatures, @engravings, @objects, $branch, $minz, $maxz);
 
-    while ($line = get_line $sref) {
-        my $tag = $line->[0];
+    while ($line = _get_line $sref) {
+        my $tag = shift @$line;
 
         if ($tag eq 'MAZE:') {
-            if (@allrows || 
-        $name = $line->[1] if ($tag eq 'MAZE:');
+            $name = $line->[0];
+            $name =~ /^(.*?)(?:-[0-9]+)?$/;
+            ($branch, $minz, $maxz) = @{ $level_info{$1} };
+        } elsif ($tag eq 'GEOMETRY:') {
+            ($halign, $valign) = @$line;
+        } elsif ($tag eq 'MAP') {
 
-    $str =~ m/\GGEOMETRY:([a-z]*),([a-z]*)\n/cg or die "missing GEOMETRY";
-    my ($halign, $valign) = ($1, $2);
+            my $wid = max map { length } @$line;
+            my $hgt = @$line;
+            @currows = @$line;
 
-    $str =~ m/\GMAP\n/cg or die "missing MAP";
+            # The following ugly and wrong code taken directly from NetHack
+            {
+                use integer;
 
-    my @rows;
-    while ($str =~ m/\G(.*)\n/cg and $str ne 'ENDMAP') {
-        push @rows, $str;
-    }
+                # XXX assumes this NetHack is compiled for 80-column maps
+                $offs_x = 3                         if $halign eq 'left';
+                $offs_x = 2 + ((78 - 2 - $wid)/4)   if $halign eq 'halfleft';
+                $offs_x = 2 + ((78 - 2 - $wid)/2)   if $halign eq 'center';
+                $offs_x = 2 + ((78 - 2 - $wid)*3/4) if $halign eq 'halfright';
+                $offs_x = 78 - $wid - 1             if $halign eq 'right';
 
-    my $wid = max map { length } @rows;
-    my $hgt = @rows;
+                $offs_y = 3                         if $valign eq 'top';
+                $offs_y = 2 + ((20 - 2 - $hgt)/2)   if $valign eq 'center';
+                $offs_y = 20 - $hgt - 1             if $valign eq 'bottom';
 
-    my ($rows_x, $rows_y);
+                $offs_x++ unless $offs_x % 1;
+                $offs_y++ unless $offs_y % 1;
 
-    # The following ugly and wrong code taken directly from NetHack
-    {
-        use integer;
+                $offs_y = 0 if $hgt == 21;
+                if ($offs_y < 0) {
+                    $offs_y += 2;
+                } elsif ($offs_y + $hgt > 21) {
+                    $offs_y -= 2;
+                }
+            }
 
-        # XXX assumes this NetHack is compiled for 80-column maps
-        $rows_x = 3                         if $halign eq 'left';
-        $rows_x = 2 + ((78 - 2 - $wid)/4)   if $halign eq 'halfleft';
-        $rows_x = 2 + ((78 - 2 - $wid)/2)   if $halign eq 'center';
-        $rows_x = 2 + ((78 - 2 - $wid)*3/4) if $halign eq 'halfright';
-        $rows_x = 78 - $wid - 1             if $halign eq 'right';
+            for my $dy (0 .. $#{$line}) {
+                push @allrows, [$offs_x, $offs_y+$dy, $line->[$dy]];
+            }
+        } elsif ($tag eq 'FOUNTAIN:') {
+            if (my ($x, $y) = _str2xy $line->[0]) {
+                push @extrafeatures, ['fountain', $x + $offs_x, $y + $offs_y];
+            }
+        } elsif ($tag eq 'REGION:') {
+            my ($rect, $light, $type, $filled, $irreg) = @$line;
 
-        $rows_y = 3                         if $valign eq 'top';
-        $rows_y = 2 + ((20 - 2 - $hgt)/2)   if $valign eq 'center';
-        $rows_y = 20 - $hgt - 1             if $valign eq 'bottom';
+            my @l = _rect2rgn($offs_x, $offs_y, $rect, $irreg, \@allrows);
 
-        $rows_x++ unless $rows_x % 1;
-        $rows_y++ unless $rows_y % 1;
+            push @{$rgn{'lit'}}, @l if ($light eq 'lit');
+            push @{$rgn{'unlit'}}, @l if ($light eq 'unlit');
 
-        $rows_y = 0 if $hgt == 21;
-        if ($rows_y < 0) {
-            $rows_y += 2;
-        } elsif ($rows_y + $hgt > 21) {
-            $rows_y -= 2;
+            push @{$rgn{'shop'}}, @l if ($type =~ /shop/);
+            push @{$rgn{'temple'}}, @l if ($type eq 'temple');
+        } elsif ($tag eq 'DOOR:' && (@$line == 2)) {
+            (my ($x, $y) = _str2xy($line->[1])) || next;
+
+            if (substr($currows[$y], $x, 1) eq 'S') {
+                push @extrafeatures, ['wall', $x + $offs_x, $y + $offs_y,
+                    $line->[0]];
+            } else {
+                push @extrafeatures, ['door', $x + $offs_x, $y + $offs_y,
+                    $line->[0]];
+            }
+        } elsif ($tag eq 'STAIR:' && (@$line == 2)) {
+            (my ($x,$y) = _str2xy($line->[0])) || next;
+
+            push @extrafeatures, ['stairs' . $line->[1],
+                $x+$offs_x, $y+$offs_y, 0];
+        } elsif ($tag eq 'NON_DIGGABLE:') {
+            push @{$rgn{'nondig'}}, _rect2rgn($offs_x, $offs_y, $line->[0]);
+        } elsif ($tag eq 'ENGRAVING:') {
+            (my ($x,$y) = _str2xy($line->[0])) || next;
+
+            push @engravings, [$x+$offs_x, $y+$offs_y,
+                ($line->[1] eq 'engrave') ? 'engraved' : 'burned', $line->[2]];
+        } elsif ($tag eq 'OBJECT:' && (@$line == 3)) {
+            my ($sym, $type, $pos) = @$line;
+            (my ($x, $y) = _str2xy($pos)) || next;
+            next if $type eq 'random'; #XXX NHI doesn't do class-types yet
+
+            push @objects, [ _item2nhi($sym, $type), $x+$offs_x, $y+$offs_y ];
+        } elsif ($tag eq 'TRAP:' && $line->[0] eq 'random' && $line->[1] eq 'random') {
+        } elsif ($tag eq 'MONSTER:') {
+            # XXX monster tracking isn't in yet
+        } else {
+            die "Unhandled tag $tag";
         }
     }
 
-    while(1) {
-        last if ($str =~ m/\G$/cg);
+    push @all, __PACKAGE__->new(
+        rows => \@allrows,
+        special_features => \@extrafeatures,
+        _regions => \%rgn,
+        level_flags => {},
+        engravings => \@engravings,
+        monsters => [],
+        items => \@objects,
+        branch => $branch,
+        min_branch_z => $minz,
+        max_branch_z => $maxz,
+    );
+}
 
-        if ($str =~ m/\GFOUNTAIN:\((.*),(.*)\)\n/cg) {
-            substr($rows[$2], $1, 1, '}'); # big room needs this fixup
-        } elsif ($str =~ 
+_parse_dgn <<END ;
+# Mine end level variant 2
+# "Gnome King's Wine Cellar"
+#
+MAZE: "minend-2", ' '
+GEOMETRY:center,center
+MAP
+---------------------------------------------------------------------------
+|...................................................|                     |
+|.|---------S--.--|...|--------------------------|..|                     |
+|.||---|   |.||-| |...|..........................|..|                     |
+|.||...| |-|.|.|---...|.............................|                ..   |
+|.||...|-|.....|....|-|..........................|..|.               ..   |
+|.||.....|-S|..|....|............................|..|..                   |
+|.||--|..|..|..|-|..|----------------------------|..|-.                   |
+|.|   |..|..|....|..................................|...                  |
+|.|   |..|..|----|..-----------------------------|..|....                 |
+|.|---|..|--|.......|----------------------------|..|.....                |
+|...........|----.--|......................|     |..|.......              |
+|-----------|...|.| |------------------|.|.|-----|..|.....|..             |
+|-----------|.{.|.|--------------------|.|..........|.....|....           |
+|...............|.S......................|-------------..-----...         |
+|.--------------|.|--------------------|.|.........................       |
+|.................|                    |.....................|........    |
+---------------------------------------------------------------------------
+ENDMAP
 
+# Dungeon Description
+FOUNTAIN:(14,13)
+REGION:(23,03,48,06),lit,"ordinary"
+REGION:(21,06,22,06),lit,"ordinary"
+REGION:(14,04,14,04),unlit,"ordinary"
+REGION:(10,05,14,08),unlit,"ordinary"
+REGION:(10,09,11,09),unlit,"ordinary"
+REGION:(15,08,16,08),unlit,"ordinary"
+# Secret doors
+DOOR:locked,(12,02)
+DOOR:locked,(11,06)
+# Stairs
+STAIR:(36,04),up
+# Non diggable walls
+NON_DIGGABLE:(00,00,52,17)
+NON_DIGGABLE:(53,00,74,00)
+NON_DIGGABLE:(53,17,74,17)
+NON_DIGGABLE:(74,01,74,16)
+NON_DIGGABLE:(53,07,55,07)
+NON_DIGGABLE:(53,14,61,14)
+# The Gnome King's wine cellar.
+ENGRAVING:(12,03),engrave,"You are now entering the Gnome King's wine cellar."
+ENGRAVING:(12,04),engrave,"Trespassers will be persecuted!"
+OBJECT:'!',"booze",(10,07)
+OBJECT:'!',"booze",(10,07)
+OBJECT:'!',random,(10,07)
+OBJECT:'!',"booze",(10,08)
+OBJECT:'!',"booze",(10,08)
+OBJECT:'!',random,(10,08)
+OBJECT:'!',"booze",(10,09)
+OBJECT:'!',"booze",(10,09)
+OBJECT:'!',"object detection",(10,09)
+# Objects
+# The Treasure chamber...
+OBJECT:'*',"diamond",(69,04)
+OBJECT:'*',random,(69,04)
+OBJECT:'*',"diamond",(69,04)
+OBJECT:'*',random,(69,04)
+OBJECT:'*',"emerald",(70,04)
+OBJECT:'*',random,(70,04)
+OBJECT:'*',"emerald",(70,04)
+OBJECT:'*',random,(70,04)
+OBJECT:'*',"emerald",(69,05)
+OBJECT:'*',random,(69,05)
+OBJECT:'*',"ruby",(69,05)
+OBJECT:'*',random,(69,05)
+OBJECT:'*',"ruby",(70,05)
+OBJECT:'*',"amethyst",(70,05)
+OBJECT:'*',random,(70,05)
+OBJECT:'*',"amethyst",(70,05)
+OBJECT:'*',"luckstone",(70,05)
+# Scattered gems...
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'*',random,random
+OBJECT:'(',random,random
+OBJECT:'(',random,random
+OBJECT:random,random,random
+OBJECT:random,random,random
+OBJECT:random,random,random
+# Random traps
+TRAP:random,random
+TRAP:random,random
+TRAP:random,random
+TRAP:random,random
+TRAP:random,random
+TRAP:random,random
+# Random monsters.
+MONSTER:'G',"gnome king",random
+MONSTER:'G',"gnome lord",random
+MONSTER:'G',"gnome lord",random
+MONSTER:'G',"gnome lord",random
+MONSTER:'G',"gnomish wizard",random
+MONSTER:'G',"gnomish wizard",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'G',"gnome",random
+MONSTER:'h',"hobbit",random
+MONSTER:'h',"hobbit",random
+MONSTER:'h',"dwarf",random
+MONSTER:'h',"dwarf",random
+MONSTER:'h',"dwarf",random
+MONSTER:'h',random,random
+END
 
 1;
 
