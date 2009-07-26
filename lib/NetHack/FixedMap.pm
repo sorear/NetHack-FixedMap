@@ -118,6 +118,15 @@ sub regions {
     return \%rgn;
 }
 
+# strip variants
+sub basename {
+    my ($self) = @_;
+
+    return $1 if $self->name =~ /^(.*)-(\d+)$/;
+    return $1 if $self->name =~ /^[A-Z][a-z][a-z]-(\w+)$/;
+    return $self->name;
+}
+
 my @all;
 
 sub all { \@all }
