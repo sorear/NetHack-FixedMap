@@ -135,6 +135,14 @@ sub basename {
     return $self->name;
 }
 
+my %level_info = (
+    minend => ['mines', 8, 9],
+);
+
+sub branch       { $level_info{ shift->basename }->[0] }
+sub min_branch_z { $level_info{ shift->basename }->[1] }
+sub max_branch_z { $level_info{ shift->basename }->[2] }
+
 my @all;
 
 sub all { \@all }
@@ -194,10 +202,6 @@ sub _item2nhi {
     return $extra;
 }
 
-my %level_info = (
-    minend => ['mines', 8, 9],
-);
-
 sub _parse_dgn {
     my $str = shift;
     my $sref = \$str;
@@ -211,8 +215,6 @@ sub _parse_dgn {
 
         if ($tag eq 'MAZE:') {
             $name = $line->[0];
-            $name =~ /^(.*?)(?:-[0-9]+)?$/;
-            ($branch, $minz, $maxz) = @{ $level_info{$1} };
         } elsif ($tag eq 'GEOMETRY:') {
             ($halign, $valign) = @$line;
         } elsif ($tag eq 'MAP') {
@@ -301,6 +303,7 @@ sub _parse_dgn {
     }
 
     push @all, __PACKAGE__->new(
+        name => $name,
         rows => \@allrows,
         special_features => \@extrafeatures,
         _regions => \%rgn,
@@ -308,9 +311,6 @@ sub _parse_dgn {
         engravings => \@engravings,
         monsters => [],
         items => \@objects,
-        branch => $branch,
-        min_branch_z => $minz,
-        max_branch_z => $maxz,
     );
 }
 
