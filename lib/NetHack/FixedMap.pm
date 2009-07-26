@@ -93,26 +93,34 @@ sub features {
     return \@features;
 }
 
+sub region {
+    my $self = shift;
+    my $name = shift;
+
+    my $raw = $self->_regions->{$name} or return [];
+    my @ret;
+
+    for my $elt (@$raw) {
+        if (@$elt == 2) {
+            push @ret, $elt;
+        } else {
+            for my $x ($elt->[0]..$elt->[2]) {
+                for my $y ($elt->[1]..$elt->[3]) {
+                    push @ret, [$x, $y];
+                }
+            }
+        }
+    }
+
+    return \@ret;
+}
+
 sub regions {
     my $self = shift;
     my %rgn;
 
     for my $name (keys %{ $self->_regions }) {
-        my $val = $self->_regions->{$name};
-
-        if (!ref $val->[0]) {
-            my @expand;
-
-            for my $x ($val->[0]..$val->[2]) {
-                for my $y ($val->[1]..$val->[3]) {
-                    push @expand, [$x, $y];
-                }
-            }
-
-            $val = \@expand;
-        }
-
-        $rgn{$name} = $val;
+        $rgn{$name} = $self->region($name);
     }
 
     return \%rgn;
