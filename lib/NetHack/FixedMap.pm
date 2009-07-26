@@ -38,13 +38,8 @@ has items => (
     is  => 'ro',
 );
 
-has ['branch', 'name'] => (
+has name => (
     isa => 'Str',
-    is  => 'ro',
-);
-
-has ['min_branch_z', 'max_branch_z'] => (
-    isa => 'Int',
     is  => 'ro',
 );
 
